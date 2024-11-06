@@ -14,7 +14,8 @@ from copy import deepcopy
 from .defs import fmts, CN_URL, DATA_ROOT, WORK_LOC
 from .utils import get_article_list, load_uploads, save_uploads, \
             write_article, get_token, get_config, create_client, \
-            get_doipath, generate_access_policy
+            generate_access_policy, get_format, get_files_from_dir
+from .eml import update_eml
 
 rpt_txt = """
 Package creation report:
@@ -30,6 +31,34 @@ Successful packages:
 """
 The package creation report text template.
 """
+
+def get_system_metadata(client, pid):
+    """
+    Get the system metadata for the given PID.
+    """
+    return client.getSystemMetadata(pid)
+
+
+def get_latest_version(client, pid):
+    """
+    Get the latest version of the given PID.
+    """
+    sm = get_system_metadata(client, pid)
+    if sm.obsoletedBy:
+        while True:
+            print(f'Obsoleted by: {sm.obsoletedBy}')
+            sm = get_system_metadata(client, sm.obsoletedBy)
+            if not sm.obsoletedBy:
+                break
+    print(f'Latest version: {sm.identifier.value()}')
+    return sm.identifier.value()
+
+
+def get_object(client: MemberNodeClient_2_0, pid):
+    """
+    Get the object for the given PID.
+    """
+    return client.get(pid)
 
 
 def generate_sys_meta(pid: str, sid: str, format_id: str, size: int, md5, now, orcid: str):
@@ -128,37 +157,18 @@ def sysmeta_obsolete_updates(client: MemberNodeClient_2_0, old_pid: str, new_pid
         return None
 
 
-def get_format(fmt: Path):
-    """
-    Test the format based on the file suffix. If none is found, fall back to
-    application/octet-stream.
-
-    :param Path fmt: The file to test.
-    :return: The format id.
-    :rtype: str
-    """
-    L = getLogger(__name__)
-    if fmt.suffix:
-        format_id = fmts.get(fmt.suffix.lower())
-        if format_id:
-            L.debug(f'Found format id {format_id}')
-            return format_id
-    L.debug(f'No format id could be found. Using "application/octet-stream"')
-    return "application/octet-stream"
-
-
-def get_filepaths(files: list, doidir: Path):
+def get_filepaths(files: list, pid_dir: Path):
     """
     Get the paths to the files in the data directory.
 
     :param list files: The list of files to search for.
-    :param Path doidir: The path to the data directory.
+    :param Path pid_dir: The path to the data directory.
     :return: The list of paths to the files.
     :rtype: list
     """
     paths = []
     for f in files:
-        p = Path(doidir / f['name'])
+        p = Path(pid_dir / f)
         if p.exists():
             paths.append(p)
         else:
@@ -167,12 +177,12 @@ def get_filepaths(files: list, doidir: Path):
     return paths
 
 
-def upload_files(orcid: str, doi: str, files: list[Path], client: MemberNodeClient_2_0):
+def upload_files(orcid: str, pid: str, files: list[Path], client: MemberNodeClient_2_0):
     """
     Upload the files to the Member Node.
 
     :param str orcid: The ORCID of the uploader.
-    :param str doi: The DOI of the article.
+    :param str pid: The pid of the record.
     :param list files: The list of files to upload.
     :param client: The Member Node client.
     :type client: MemberNodeClient_2_0
@@ -185,12 +195,12 @@ def upload_files(orcid: str, doi: str, files: list[Path], client: MemberNodeClie
     data_pids = None
     sm_dict = {}
     # get the path to the data directory
-    doidir = get_doipath(doi)
+    pid_dir = Path(DATA_ROOT / pid)
     # get the paths to the files
-    files = get_filepaths(doidir=doidir, files=files)
+    files = get_filepaths(piddir=pid_dir, files=files)
     flen = len(files)
     if flen == 0:
-        raise FileNotFoundError(f'{doi} No files found for this version chain!')
+        raise FileNotFoundError(f'{pid} No files found for this version chain!')
     # keep track of data pids for resource mapping
     data_pids = []
     i = 0
@@ -200,50 +210,50 @@ def upload_files(orcid: str, doi: str, files: list[Path], client: MemberNodeClie
             # get the format of the file
             fformat = get_format(f)
             data_pid = f"urn:uuid:{str(uuid.uuid4())}"
-            L.debug(f'{doi} Reading {f.name} ({fformat})')
+            L.debug(f'{pid} Reading {f.name} ({fformat})')
             data_bytes = f.read_bytes()
-            L.debug(f'{doi} Generating sysmeta for {f.name}')
+            L.debug(f'{pid} Generating sysmeta for {f.name}')
             data_sm, md5, size = generate_system_metadata(pid=data_pid,
-                                                        sid=doi,
+                                                        sid=pid,
                                                         format_id=fformat,
                                                         science_object=data_bytes,
                                                         orcid=orcid)
-            L.info(f'{doi} ({i}/{flen}) Uploading {f.name} ({round(size/(1024*1024), 1)} MB)')
+            L.info(f'{pid} ({i}/{flen}) Uploading {f.name} ({round(size/(1024*1024), 1)} MB)')
             dmd = client.create(data_pid, data_bytes, data_sm)
             if isinstance(dmd, dataoneTypes.Identifier):
                 # if the response is an identifier, the upload was successful
                 try:
-                    L.info(f'{doi} Received response for science object upload: {dmd.value()}')
+                    L.info(f'{pid} Received response for science object upload: {dmd.value()}')
                 except Exception as e:
-                    L.error(f'{doi} Received <d1_common.types.generated.dataoneTypes_v1.Identifier> but could not print value: {repr(e)}')
+                    L.error(f'{pid} Received <d1_common.types.generated.dataoneTypes_v1.Identifier> but could not print value: {repr(e)}')
                 # add the data pid to the list of data pids
                 data_pids.append(data_pid)
                 sm_dict[md5] = {
                     'filename': f.name,
                     'size': size,
-                    'doi': doi,
+                    'pid': pid,
                     'identifier': data_pid,
                     'formatId': fformat,
                     'url': f"{CN_URL}{sep}v2/resolve/{data_pid}",
                 }
             else:
-                L.error(f'{doi} Unexpected response type: {type(dmd)}')
+                L.error(f'{pid} Unexpected response type: {type(dmd)}')
                 try:
-                    L.debug(f'{doi} Received response:\n{dmd.value()}')
+                    L.debug(f'{pid} Received response:\n{dmd.value()}')
                 except Exception as e:
-                    L.error(f'{doi} Could not print response: {repr(e)}')
+                    L.error(f'{pid} Could not print response: {repr(e)}')
         except Exception as e:
-            L.error(f'{doi} upload failed ({e})')
+            L.error(f'{pid} upload failed ({e})')
             raise BaseException(e)
     return sm_dict
 
 
-def upload_eml(orcid: str, doi: str, eml: str, client: MemberNodeClient_2_0):
+def upload_eml(orcid: str, pid: str, eml: str, client: MemberNodeClient_2_0):
     """
     Upload the EML to the Member Node.
     
     :param str orcid: The ORCID of the uploader.
-    :param str doi: The DOI of the article.
+    :param str pid: The pid of the metadata record.
     :param str eml: The EML to upload.
     :param client: The Member Node client.
     :type client: MemberNodeClient_2_0
@@ -254,35 +264,34 @@ def upload_eml(orcid: str, doi: str, eml: str, client: MemberNodeClient_2_0):
     eml_pid = f"urn:uuid:{str(uuid.uuid4())}"
     eml_bytes = eml.encode("utf-8")
     eml_sm, eml_md5, eml_size = generate_system_metadata(pid=eml_pid,
-                                                         sid=doi,
+                                                         sid=pid,
                                                          format_id="https://eml.ecoinformatics.org/eml-2.2.0",
                                                          science_object=eml_bytes,
                                                          orcid=orcid)
     eml_dmd = client.create(eml_pid, eml_bytes, eml_sm)
     if isinstance(eml_dmd, dataoneTypes.Identifier):
         try:
-            L.info(f'{doi} Received response for EML upload: {eml_dmd.value()}\n{eml_dmd}')
+            L.info(f'{pid} Received response for EML upload: {eml_dmd.value()}\n{eml_dmd}')
             if eml_dmd.value() == eml_pid:
-                L.info(f'{doi} EML uploaded successfully: {eml_pid}')
+                L.info(f'{pid} EML uploaded successfully: {eml_pid}')
             else:
-                L.error(f'{doi} EML identifier does not match D1 identifier! {eml_pid} != {eml_dmd.value()}')
+                L.error(f'{pid} EML identifier does not match D1 identifier! {eml_pid} != {eml_dmd.value()}')
         except Exception as e:
-            L.error(f'{doi} Received <d1_common.types.generated.dataoneTypes_v1.Identifier> but could not print value: {repr(e)}')
+            L.error(f'{pid} Received <d1_common.types.generated.dataoneTypes_v1.Identifier> but could not print value: {repr(e)}')
         return eml_pid, eml_md5, eml_size
     else:
-        L.error(f'{doi} Unexpected response type: {type(eml_dmd)}')
+        L.error(f'{pid} Unexpected response type: {type(eml_dmd)}')
         try:
-            L.debug(f'{doi} Received response:\n{eml_dmd.value()}')
+            L.debug(f'{pid} Received response:\n{eml_dmd.value()}')
         except Exception as e:
-            L.error(f'{doi} Could not print response: {repr(e)}')
+            L.error(f'{pid} Could not print response: {repr(e)}')
         return None
 
 
 def generate_resource_map(eml_pid: str, data_pids: list):
     """
-    Generate the resource map XML for the given DOI, EML PID, and data PIDs.
+    Generate the resource map XML for the given record, EML PID, and data PIDs.
 
-    :param str doi: The DOI of the article.
     :param str eml_pid: The PID of the EML.
     :param list data_pids: The list of data PIDs.
     :return: The resource map XML.
@@ -298,11 +307,11 @@ def generate_resource_map(eml_pid: str, data_pids: list):
     return resource_map
 
 
-def upload_resource_map(doi: str, resource_map: ResourceMap, client: MemberNodeClient_2_0, orcid: str):
+def upload_resource_map(pid: str, resource_map: ResourceMap, client: MemberNodeClient_2_0, orcid: str):
     """
     Upload the resource map to the Member Node.
 
-    :param str doi: The DOI of the article.
+    :param str pid: The pid of the record.
     :param resource_map: The resource map XML.
     :type resource_map: ResourceMap
     :param client: The Member Node client.
@@ -314,52 +323,52 @@ def upload_resource_map(doi: str, resource_map: ResourceMap, client: MemberNodeC
     resource_map_pid = resource_map.getResourceMapPid()
     resource_map_bytes = resource_map.serialize(format="xml")
     resource_map_sm, resource_map_md5, resource_map_size = generate_system_metadata(pid=resource_map_pid,
-                                                                                    sid=doi,
+                                                                                    sid=pid,
                                                                                     format_id="http://www.openarchives.org/ore/terms",
                                                                                     science_object=resource_map_bytes,
                                                                                     orcid=orcid)
     resource_map_dmd = client.create(resource_map_pid, resource_map_bytes, resource_map_sm)
     if isinstance(resource_map_dmd, dataoneTypes.Identifier):
         try:
-            L.info(f'{doi} Received response for resource map upload: {resource_map_dmd.value()}')
+            L.info(f'{pid} Received response for resource map upload: {resource_map_dmd.value()}')
             if resource_map_dmd.value() == resource_map_pid:
-                L.info(f'{doi} Resource map uploaded successfully: {resource_map_pid}')
+                L.info(f'{pid} Resource map uploaded successfully: {resource_map_pid}')
             else:
-                L.error(f'{doi} Resource map identifier does not match D1 identifier! {resource_map_pid} != {resource_map_dmd.value()}')
+                L.error(f'{pid} Resource map identifier does not match D1 identifier! {resource_map_pid} != {resource_map_dmd.value()}')
         except Exception as e:
-            L.error(f'{doi} Received <d1_common.types.generated.dataoneTypes_v1.Identifier> but could not print value: {repr(e)}')
+            L.error(f'{pid} Received <d1_common.types.generated.dataoneTypes_v1.Identifier> but could not print value: {repr(e)}')
         return resource_map_pid, resource_map_md5, resource_map_size
     else:
-        L.error(f'{doi} Unexpected response type: {type(resource_map_dmd)}')
+        L.error(f'{pid} Unexpected response type: {type(resource_map_dmd)}')
         try:
-            L.debug(f'{doi} Received response:\n{resource_map_dmd.value()}')
+            L.debug(f'{pid} Received response:\n{resource_map_dmd.value()}')
         except Exception as e:
-            L.error(f'{doi} Could not print response: {repr(e)}')
+            L.error(f'{pid} Could not print response: {repr(e)}')
         return None
 
 
-def report(succ: int, fail: int, finished_dois: list, failed_dois: list):
+def report(succ: int, fail: int, finished_pids: list, failed_pids: list):
     """
     Generate and print a short report with the successes and failures of the
     process.
 
     :param int succ: The number of successful uploads.
     :param int fail: The number of failed uploads.
-    :param list finished_dois: The DOIs that were successfully uploaded.
-    :param list failed_dois: The DOIs that failed to upload.
+    :param list finished_pids: The pids that were successfully uploaded.
+    :param list failed_pids: The pids that failed to upload.
     """
     L = getLogger(__name__)
-    finished_str = "\n".join(str(x) for x in finished_dois)
-    failed_str = "\n".join(str(x) for x in failed_dois)
+    finished_str = "\n".join(str(x) for x in finished_pids)
+    failed_str = "\n".join(str(x) for x in failed_pids)
     L.info(rpt_txt % (fail, succ, failed_str, finished_str))
 
 
-def upload_manager(articles: list, orcid: str, client: MemberNodeClient_2_0, node: str):
+def upload_manager(pids: list, orcid: str, client: MemberNodeClient_2_0, node: str):
     """
     Package creation and upload loop. This function will create packages and
     upload them to the Member Node.
 
-    :param list articles: The list of articles to upload.
+    :param list pids: The list of pids to upload.
     :param str orcid: The ORCID of the uploader.
     :param client: The Member Node client.
     :type client: MemberNodeClient_2_0
@@ -367,7 +376,7 @@ def upload_manager(articles: list, orcid: str, client: MemberNodeClient_2_0, nod
     """
     L = getLogger(__name__)
     sep = '' if CN_URL.endswith('/') else '/'
-    n = len(articles)
+    n = len(pids)
     i = 0
     er = 0
     succ_list = []
@@ -378,61 +387,53 @@ def upload_manager(articles: list, orcid: str, client: MemberNodeClient_2_0, nod
     except FileNotFoundError:
         uploads = {}
     try:
-        for article in articles:
+        for pid in pids:
             old_eml_pid, old_resource_map_pid = None, None
             i += 1
-            L.debug(f'Article:\n{article}')
-            doi = article.get('doi')
-            title = article.get('title')
-            L.info(f'({i}/{n}) Working on {doi}')
-            # write the original figshare metadata to file and keep track of its attributes
-            af = write_article(article=article, doi=doi, title='original_metadata', fmt='json')
-            files = article.get('files')
-            files.append({
-                'name': f'original_metadata.json',
-                'computed_md5': hashlib.md5(af.read_bytes()).hexdigest(),
-                'mimetype': 'application/json',
-            })
+            L.debug(f'PID: {pid}')
+            pid = get_latest_version(client, pid)
+            # get the files to be uploaded
+            files = get_files_from_dir(Path(DATA_ROOT / pid))
             # check if the article has already been uploaded
             ulist = deepcopy(files)
-            if not (uploads.get(doi)):
-                uploads[doi] = {}
+            if not (uploads.get(pid)):
+                uploads[pid] = {}
             else:
                 prev_upls = 0
-                for uf in uploads.get(doi):
-                    L.debug(f'Already uploaded file: {uploads[doi][uf]}')
+                for uf in uploads.get(pid):
+                    L.debug(f'Already uploaded file: {uploads[pid][uf]}')
                     for f in files:
                         # if the file is already uploaded and its md5 matches the current file
                         # add the pid and url to the files object for inclusion in the resource map
-                        if f.get('computed_md5') in uploads[doi]:
-                            f['d1_url'] = uploads[doi][f.get('computed_md5')]['url']
-                            f['pid'] = uploads[doi][f.get('computed_md5')]['identifier']
+                        if f.get('computed_md5') in uploads[pid]:
+                            f['d1_url'] = uploads[pid][f.get('computed_md5')]['url']
+                            f['pid'] = uploads[pid][f.get('computed_md5')]['identifier']
                         else:
                             # otherwise, add the file to the list of files related to the article
                             files.append({
-                                'pid': uploads[doi][uf]['identifier'],
-                                'name': uploads[doi][uf]['filename'],
+                                'pid': uploads[pid][uf]['identifier'],
+                                'name': uploads[pid][uf]['filename'],
                                 'computed_md5': uf,
-                                'd1_url': uploads[doi][uf]['url'],
-                                'size': uploads[doi][uf]['size'],
-                                'mimetype': uploads[doi][uf]['formatId'],
+                                'd1_url': uploads[pid][uf]['url'],
+                                'size': uploads[pid][uf]['size'],
+                                'mimetype': uploads[pid][uf]['formatId'],
                             })
                     fn = 0
                     for f in ulist:
                         # if the file is already uploaded, remove it from the list of files to upload
-                        if uploads[doi][uf]['filename'] == f['name']:
+                        if uploads[pid][uf]['filename'] == f['name']:
                             prev_upls += 1
                             del ulist[fn]
                         fn += 1
-                L.info(f'Found {prev_upls} files that were already uploaded associated with {doi}')
+                L.info(f'Found {prev_upls} files that were already uploaded associated with {pid}')
             try:
                 if len(ulist) > 0:
                     # Upload the data files to the Member Node if there are any in the ulist
-                    sm_dict = upload_files(orcid, doi, ulist, client)
-                    L.info(f'{doi} done. Uploaded {len(sm_dict)} files.')
+                    sm_dict = upload_files(orcid, pid, ulist, client)
+                    L.info(f'{pid} done. Uploaded {len(sm_dict)} files.')
                     for fi in sm_dict:
                         # add the uploaded files to the uploads dictionary
-                        uploads[doi][fi] = sm_dict[fi]
+                        uploads[pid][fi] = sm_dict[fi]
                         for f in files:
                             # add the dataone url to the files object for inclusion in the resource map
                             if (f['name'] == sm_dict[fi]['filename']) and (f['computed_md5'] == fi):
@@ -440,25 +441,24 @@ def upload_manager(articles: list, orcid: str, client: MemberNodeClient_2_0, nod
                                 f['pid'] = sm_dict[fi]['identifier']
                     save_uploads(uploads, fp=uploads_loc)
                 else:
-                    L.info(f'No data files to upload for {doi}')
+                    L.info(f'No data files to upload for {pid}')
                 # Convert the article to EML
-                eml_string = figshare_to_eml(article)
-                # Write the EML to file
-                eml_fn = write_article(article=eml_string, doi=doi, title=title, fmt='xml')
+                eml_string = client.get(pid).text
+                eml_mod = update_eml(eml_string, sm_dict)
                 # Upload the EML to the Member Node
-                if uploads[doi].get('eml'):
-                    old_eml_pid = uploads[doi]['eml']['identifier']
-                    L.info(f'{doi} Found previous EML: {old_eml_pid}')
-                eml_pid, eml_md5, eml_size = upload_eml(orcid, doi, eml_string, client)
+                if uploads[pid].get('eml'):
+                    old_eml_pid = uploads[pid]['eml']['identifier']
+                    L.info(f'{pid} Found previous EML: {old_eml_pid}')
+                eml_pid, eml_md5, eml_size = upload_eml(orcid, pid, eml_mod, client)
                 if old_eml_pid:
-                    L.info(f'{doi} Adding obsoletedBy to old EML sysmeta object: {uploads[doi]["eml"]["identifier"]}')
+                    L.info(f'{pid} Adding obsoletedBy to old EML sysmeta object: {uploads[pid]["eml"]["identifier"]}')
                     # Update old sysmeta with obsoletedBy
                     sysmeta_obsolete_updates(client, old_eml_pid, eml_pid)
                 if eml_pid:
-                    uploads[doi]['eml'] = {
-                        'filename': f"{eml_fn.name}",
+                    uploads[pid]['eml'] = {
+                        'filename': None,
                         'size': eml_size,
-                        'doi': doi,
+                        'pid': pid,
                         'identifier': eml_pid,
                         'md5': eml_md5,
                         'formatId': "https://eml.ecoinformatics.org/eml-2.2.0",
@@ -472,54 +472,54 @@ def upload_manager(articles: list, orcid: str, client: MemberNodeClient_2_0, nod
                         if f.get('pid'):
                             pid_list.append(f.get('pid'))
                         else:
-                            L.warning(f'{doi} No pid key found for {f["name"]}')
+                            L.warning(f'{pid} No pid key found for {f["name"]}')
                             if f.get('computed_md5') in sm_dict:
                                 pid_list.append(sm_dict[f['computed_md5']]['identifier'])
                             else:
-                                L.error(f'{doi} No PID found for {f["name"]}')
+                                L.error(f'{pid} No PID found for {f["name"]}')
                     resource_map = generate_resource_map(eml_pid=eml_pid, data_pids=pid_list)
-                    if uploads[doi].get('resource_map'):
-                        old_resource_map_pid = uploads[doi]['resource_map']['identifier']
-                        L.info(f'{doi} Found previous resource map: {old_resource_map_pid}')
+                    if uploads[pid].get('resource_map'):
+                        old_resource_map_pid = uploads[pid]['resource_map']['identifier']
+                        L.info(f'{pid} Found previous resource map: {old_resource_map_pid}')
                     # Upload the resource map to the Member Node
                     resource_map_pid, resource_map_md5, resource_map_size = upload_resource_map(
-                        doi=doi,
+                        pid=pid,
                         resource_map=resource_map,
                         client=client,
                         orcid=orcid,
                     )
                     if old_resource_map_pid:
-                        L.info(f'{doi} Adding obsoletedBy to old resource map sysmeta object: {old_resource_map_pid}')
+                        L.info(f'{pid} Adding obsoletedBy to old resource map sysmeta object: {old_resource_map_pid}')
                         sysmeta_obsolete_updates(client, old_pid=old_resource_map_pid, new_pid=resource_map.getResourceMapPid())
                     # Put the resource map info in the uploads dictionary
                     if resource_map_pid:
-                        uploads[doi]['resource_map'] = {
+                        uploads[pid]['resource_map'] = {
                             'filename': 'resource_map.xml',
                             'size': resource_map_size,
-                            'doi': doi,
+                            'pid': pid,
                             'identifier': resource_map_pid,
                             'md5': resource_map_md5,
                             'formatId': "http://www.openarchives.org/ore/terms",
                             'url': f"{CN_URL}{sep}v2/resolve/{resource_map_pid}",
                         }
                         save_uploads(uploads, fp=uploads_loc)
-                        L.info(f'{doi} Resource map uploaded successfully: {resource_map_pid}')
+                        L.info(f'{pid} Resource map uploaded successfully: {resource_map_pid}')
                     else:
-                        uploads[doi]['resource_map'] = None
-                        raise exceptions.DataONEException(f'{doi} Resource map upload failed')
+                        uploads[pid]['resource_map'] = None
+                        raise exceptions.DataONEException(f'{pid} Resource map upload failed')
                 else:
-                    uploads[doi]['eml'] = None
-                    raise exceptions.DataONEException(f'{doi} EML upload failed')
-                succ_list.append(doi)
+                    uploads[pid]['eml'] = None
+                    raise exceptions.DataONEException(f'{pid} EML upload failed')
+                succ_list.append(pid)
             except Exception as e:
                 er += 1
-                err_list.append(doi)
-                L.error(f'{doi} / {repr(e)}')
+                err_list.append(pid)
+                L.error(f'{pid} / {repr(e)}')
     except KeyboardInterrupt:
         L.info('Caught KeyboardInterrupt; generating report...')
     finally:
         save_uploads(uploads, fp=uploads_loc)
-        report(succ=i-er, fail=er, finished_dois=succ_list, failed_dois=err_list)
+        report(succ=i-er, fail=er, finished_pids=succ_list, failed_pids=err_list)
 
 
 def run_data_upload():
@@ -540,9 +540,7 @@ def run_data_upload():
     L.info(f'Root path: {DATA_ROOT}')
     # Create the Member Node Client
     client: MemberNodeClient_2_0 = create_client(mn_url, auth_token=auth_token)
-    articles = get_article_list(metadata_json)
-    L.info(f'Found {len(articles)} metadata records')
-    upload_manager(articles=articles, orcid=orcid, client=client, node=node)
+    L.info(f'The preferred way to run this script is to use the Jupyter Notebook (upload.ipynb). Shutting down.')
     client._session.close()
 
 

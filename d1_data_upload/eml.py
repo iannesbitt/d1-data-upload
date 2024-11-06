@@ -5,7 +5,7 @@ from html2text import html2text
 from pathlib import Path
 
 from .utils import parse_name, get_lat_lon, get_article_list, write_article, fix_datetime
-from .defs import GROUP_ID, fmts
+from .defs import fmts
 
 def get_etype(fileobj: Path):
     """
@@ -26,6 +26,10 @@ def update_eml(eml, pids: dict):
     root = eml.getroot()
     # Get the dataset element
     dataset = SubElement(root, 'dataset')
+    # Clear the dataset subelement of previous content
+    for child in list(dataset):
+        dataset.remove(child)
+    # Add the new resource PIDs
     for pid in pids:
         entity = SubElement(dataset, 'otherEntity', id=pid)
         entityName = SubElement(entity, 'entityName')

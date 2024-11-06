@@ -2,6 +2,7 @@ import json
 import re
 from pygeodesy.namedTuples import LatLon3Tuple
 from logging import getLogger
+import hashlib
 
 from d1_client.mnclient_2_0 import MemberNodeClient_2_0
 from d1_common.types import dataoneTypes
@@ -11,8 +12,7 @@ from pathlib import Path
 from logging import getLogger
 from datetime import datetime, timedelta
 
-from .defs import GROUP_ID, CN_URL, CONFIG_LOC, CONFIG
-
+from .defs import CN_URL, CONFIG_LOC, CONFIG, DATA_ROOT, fmts
 
 def get_token():
     """
@@ -59,8 +59,18 @@ def get_config():
     # set the data root and CN URL
     DATA_ROOT = Path(config['data_root'])
     CN_URL = config['cnurl'] if config.get('cnurl') else CN_URL
-    config['metadata_json'] = str(Path(config['metadata_json']).expanduser().absolute())
     return config
+
+
+def get_data_root(config: dict):
+    """
+    Get the data root from the config file.
+
+    :param dict config: The configuration dictionary.
+    :return: The data root.
+    :rtype: Path
+    """
+    return Path(config['data_root'])
 
 
 def create_client(mn_url: str, auth_token: str):
@@ -268,86 +278,26 @@ def pathify(title: str):
     return re.sub(r'[^\w\s]', '', title).replace(' ', '_')[:48]
 
 
-def get_doipath(doi: str):
+def write_article(eml: dict | str, config: dict, pid: str, fmt: str='xml'):
     """
-    Get the path to the data directory for a given DOI.
-
-    :param doi: The DOI to search for.
-    :type doi: str
-    :return: The path to the data directory.
-    :rtype: Path
-    """
-    L = getLogger(__name__)
-    global DATA_ROOT
-    doidir = Path(DATA_ROOT / doi)
-    if not doidir.exists():
-        L.info(f'{doidir} does not exist. Trying other versions...')
-        doidir = search_versions(doi)
-    return doidir
-
-
-def search_versions(doi: str):
-    """
-    Search the directory structure for a given DOI. If no dir is found, then
-    decrease the version at the end of the DOI until a directory is found that
-    matches. Return a path with the appropriate DOI version.
-
-    :param str doi: The DOI to search for.
-    :return: The path to the data directory.
-    :rtype: Path
-    """
-    global DATA_ROOT
-    L = getLogger(__name__)
-    doidir = Path(DATA_ROOT / doi)
-    if not doidir.exists():
-        # we need to figure out where the closest version is (or if it exists?)
-        try:
-            # split the doi into the root and version
-            [doiroot, version] = doidir.__str__().split('.v')
-            version = int(version)
-            versions = 0
-            L.info(f'{doi} starting with version {version}')
-            while True:
-                # decrement the version and check if the directory exists
-                version -= 1
-                moddir = Path(DATA_ROOT / f'{doiroot}.v{version}')
-                L.info(f'Trying {moddir}')
-                if moddir.exists():
-                    return moddir
-                else:
-                    if version > 0:
-                        continue
-                    else:
-                        L.info(f'Found {versions} versions of doi root {doi}')
-                        break
-        except ValueError:
-            L.info(f'{doi} has no version.')
-        except Exception as e:
-            L.error(f'{repr(e)} has occurred: {e}')
-    return doidir
-
-
-def write_article(article: dict | str, doi: str, title: str, fmt: str):
-    """
-    Writes the article dictionary to a file.
-    This function can write the article in either JSON or XML format.
-    It is used to preserve the original Figshare article in JSON format
+    Writes the EML to a file.
+    This function can write the EML in XML format.
+    It is used to preserve the original EML
     and to write the EML XML file for upload to DataONE.
 
-    :param article: The article data to write.
-    :type article: dict
+    :param eml: The EML data to write.
+    :type eml: dict
     :param path: The format to write the article in (e.g., 'json', 'xml').
     :type path: Path
     """
     L = getLogger(__name__)
-    doipath = get_doipath(doi)
-    path = Path(doipath / f"{pathify(title)}.{fmt}")
+    path = Path(config['data_root'] / f"{pathify(pid)}.{fmt}")
     L.info(f'Writing {fmt} file to {path}')
     with open(str(Path(path)), 'w') as f:
         if fmt == 'json':
-            json.dump(article, fp=f, indent=2)
+            json.dump(eml, fp=f, indent=2)
         elif fmt == 'xml':
-            f.write(article)
+            f.write(eml)
     L.info(f'Wrote {fmt}.')
     return path
 
@@ -524,6 +474,44 @@ def fix_access_policies():
     client._session.close()
 
 
+def get_format(fmt: Path):
+    """
+    Test the format based on the file suffix. If none is found, fall back to
+    application/octet-stream.
+
+    :param Path fmt: The file to test.
+    :return: The format id.
+    :rtype: str
+    """
+    L = getLogger(__name__)
+    if fmt.suffix:
+        format_id = fmts.get(fmt.suffix.lower())
+        if format_id:
+            L.debug(f'Found format id {format_id}')
+            return format_id
+    L.debug(f'No format id could be found. Using "application/octet-stream"')
+    return "application/octet-stream"
+
+
+def get_files_from_dir(directory: Path):
+    """
+    Get a list of files from a directory.
+
+    :param Path directory: The directory to get files from.
+    :return: A list of files in the directory.
+    :rtype: list
+    """
+    objs = [f for f in directory.iterdir() if f.is_file()]
+    files = []
+    for obj in objs:
+        files.append({
+            'name': obj.name,
+            'computed_md5': hashlib.md5(obj.read_bytes()).hexdigest(),
+            'mimetype': get_format(obj),
+        })
+    return files
+
+
 def save_uploads(uploads: dict, fp: Path='./uploads.json'):
     """
     Save the uploads dictionary to a file.
@@ -572,4 +560,4 @@ def load_uploads(fp: Path='./uploads.json'):
         return uploads
     else:
         L.error('Could not find uploads file!')
-        raise FileNotFoundError('Could not find an uploads info json file!')
+        return {}
