@@ -39,6 +39,13 @@ def get_system_metadata(client, pid):
     return client.getSystemMetadata(pid)
 
 
+def get_access_policy(client, pid):
+    """
+    Get the access policy for the given PID.
+    """
+    return client.getSystemMetadata(pid).accessPolicy
+
+
 def get_latest_version(client, pid):
     """
     Get the latest version of the given PID.
@@ -61,16 +68,18 @@ def get_object(client: MemberNodeClient_2_0, pid):
     return client.get(pid)
 
 
-def generate_sys_meta(pid: str, sid: str, format_id: str, size: int, md5, now, orcid: str):
+def generate_sys_meta(pid: str, sid: str, format_id: str, size: int, md5, now, orcid: str, ap=None):
     """
     Fills out the system metadata object with the needed properties
 
     :param pid: The pid of the system metadata document
+    :param sid: The series id of the document being described
     :param format_id: The format of the document being described
     :param size: The size of the document that is being described
     :param md5: The md5 hash of the document being described
     :param now: The current time
     :param orcid: The uploader's orcid
+    :param ap: The access policy of the document being described (``None`` will default to public read)
     :return: The system metadata document
     :rtype: dataoneTypes.systemMetadata
     """
@@ -86,17 +95,23 @@ def generate_sys_meta(pid: str, sid: str, format_id: str, size: int, md5, now, o
     sys_meta.checksum.algorithm = 'MD5'
     sys_meta.dateUploaded = now
     sys_meta.dateSysMetadataModified = now
-    sys_meta.accessPolicy = generate_access_policy()
+    if ap:
+        sys_meta.accessPolicy = ap
+    else:
+        sys_meta.accessPolicy = generate_access_policy()
     return sys_meta
 
 
-def generate_system_metadata(pid: str, sid: str, format_id: str, science_object: bytes, orcid: str):
+def generate_system_metadata(pid: str, sid: str, format_id: str, science_object: bytes, orcid: str, ap=None):
     """
     Generates a system metadata document.
 
     :param pid: The pid that the object will have
+    :param sid: The series id of the object
     :param format_id: The format of the object (e.g text/csv)
     :param science_object: The object that is being described
+    :param orcid: The orcid of the uploader
+    :param ap: The access policy of the object (``None`` will default to public read)
     :return: The system metadata document, MD5 sum, and size of the object
     :rtype: tuple
     """
@@ -113,7 +128,7 @@ def generate_system_metadata(pid: str, sid: str, format_id: str, science_object:
     md5.update(science_object)
     md5 = md5.hexdigest()
     now = datetime.datetime.now()
-    sys_meta = generate_sys_meta(pid, sid, format_id, size, md5, now, orcid)
+    sys_meta = generate_sys_meta(pid, sid, format_id, size, md5, now, orcid, ap=ap)
     return sys_meta, md5, size
 
 
@@ -177,7 +192,7 @@ def get_filepaths(files: list, pid_dir: Path):
     return paths
 
 
-def upload_files(orcid: str, pid: str, files: list[Path], client: MemberNodeClient_2_0):
+def upload_files(orcid: str, pid: str, files: list[Path], client: MemberNodeClient_2_0, ap=None):
     """
     Upload the files to the Member Node.
 
@@ -186,6 +201,7 @@ def upload_files(orcid: str, pid: str, files: list[Path], client: MemberNodeClie
     :param list files: The list of files to upload.
     :param client: The Member Node client.
     :type client: MemberNodeClient_2_0
+    :param ap: The access policy of the record. Defaults to public read (``None``).
     :return: A dictionary of checksums and file information.
     :rtype: dict
     """
@@ -217,7 +233,8 @@ def upload_files(orcid: str, pid: str, files: list[Path], client: MemberNodeClie
                                                         sid=pid,
                                                         format_id=fformat,
                                                         science_object=data_bytes,
-                                                        orcid=orcid)
+                                                        orcid=orcid,
+                                                        ap=ap)
             L.info(f'{pid} ({i}/{flen}) Uploading {f.name} ({round(size/(1024*1024), 1)} MB)')
             dmd = client.create(data_pid, data_bytes, data_sm)
             if isinstance(dmd, dataoneTypes.Identifier):
@@ -248,7 +265,7 @@ def upload_files(orcid: str, pid: str, files: list[Path], client: MemberNodeClie
     return sm_dict
 
 
-def upload_eml(orcid: str, pid: str, eml: str, client: MemberNodeClient_2_0):
+def upload_eml(orcid: str, pid: str, eml: str, client: MemberNodeClient_2_0, ap=None):
     """
     Upload the EML to the Member Node.
     
@@ -257,6 +274,7 @@ def upload_eml(orcid: str, pid: str, eml: str, client: MemberNodeClient_2_0):
     :param str eml: The EML to upload.
     :param client: The Member Node client.
     :type client: MemberNodeClient_2_0
+    :param ap: The access policy of the record. Defaults to public read (``None``).
     :return: The identifier of the EML.
     :rtype: str
     """
@@ -267,7 +285,8 @@ def upload_eml(orcid: str, pid: str, eml: str, client: MemberNodeClient_2_0):
                                                          sid=pid,
                                                          format_id="https://eml.ecoinformatics.org/eml-2.2.0",
                                                          science_object=eml_bytes,
-                                                         orcid=orcid)
+                                                         orcid=orcid,
+                                                         ap=ap)
     eml_dmd = client.create(eml_pid, eml_bytes, eml_sm)
     if isinstance(eml_dmd, dataoneTypes.Identifier):
         try:
@@ -307,7 +326,7 @@ def generate_resource_map(eml_pid: str, data_pids: list):
     return resource_map
 
 
-def upload_resource_map(pid: str, resource_map: ResourceMap, client: MemberNodeClient_2_0, orcid: str):
+def upload_resource_map(pid: str, resource_map: ResourceMap, client: MemberNodeClient_2_0, orcid: str, ap=None):
     """
     Upload the resource map to the Member Node.
 
@@ -326,7 +345,8 @@ def upload_resource_map(pid: str, resource_map: ResourceMap, client: MemberNodeC
                                                                                     sid=pid,
                                                                                     format_id="http://www.openarchives.org/ore/terms",
                                                                                     science_object=resource_map_bytes,
-                                                                                    orcid=orcid)
+                                                                                    orcid=orcid,
+                                                                                    ap=ap)
     resource_map_dmd = client.create(resource_map_pid, resource_map_bytes, resource_map_sm)
     if isinstance(resource_map_dmd, dataoneTypes.Identifier):
         try:
@@ -392,6 +412,7 @@ def upload_manager(pids: list, orcid: str, client: MemberNodeClient_2_0, node: s
             i += 1
             L.debug(f'PID: {pid}')
             pid = get_latest_version(client, pid)
+            ap = get_access_policy(client, pid)
             # get the files to be uploaded
             files = get_files_from_dir(Path(DATA_ROOT / pid))
             # check if the article has already been uploaded
@@ -429,7 +450,7 @@ def upload_manager(pids: list, orcid: str, client: MemberNodeClient_2_0, node: s
             try:
                 if len(ulist) > 0:
                     # Upload the data files to the Member Node if there are any in the ulist
-                    sm_dict = upload_files(orcid, pid, ulist, client)
+                    sm_dict = upload_files(orcid, pid, ulist, client, ap=ap)
                     L.info(f'{pid} done. Uploaded {len(sm_dict)} files.')
                     for fi in sm_dict:
                         # add the uploaded files to the uploads dictionary
@@ -449,14 +470,14 @@ def upload_manager(pids: list, orcid: str, client: MemberNodeClient_2_0, node: s
                 if uploads[pid].get('eml'):
                     old_eml_pid = uploads[pid]['eml']['identifier']
                     L.info(f'{pid} Found previous EML: {old_eml_pid}')
-                eml_pid, eml_md5, eml_size = upload_eml(orcid, pid, eml_mod, client)
+                eml_pid, eml_md5, eml_size = upload_eml(orcid, pid, eml_mod, client, ap=ap)
                 if old_eml_pid:
                     L.info(f'{pid} Adding obsoletedBy to old EML sysmeta object: {uploads[pid]["eml"]["identifier"]}')
                     # Update old sysmeta with obsoletedBy
                     sysmeta_obsolete_updates(client, old_eml_pid, eml_pid)
                 if eml_pid:
                     uploads[pid]['eml'] = {
-                        'filename': None,
+                        'filename': 'eml.xml',
                         'size': eml_size,
                         'pid': pid,
                         'identifier': eml_pid,
@@ -487,6 +508,7 @@ def upload_manager(pids: list, orcid: str, client: MemberNodeClient_2_0, node: s
                         resource_map=resource_map,
                         client=client,
                         orcid=orcid,
+                        ap=ap
                     )
                     if old_resource_map_pid:
                         L.info(f'{pid} Adding obsoletedBy to old resource map sysmeta object: {old_resource_map_pid}')
