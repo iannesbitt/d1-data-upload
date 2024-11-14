@@ -181,9 +181,11 @@ def get_filepaths(files: list, pid_dir: Path):
     :return: The list of paths to the files.
     :rtype: list
     """
+    L = getLogger(__name__)
     paths = []
     for f in files:
-        p = Path(pid_dir / f)
+        p = Path(pid_dir / f['name'])
+        L.debug(f'Path: {p}')
         if p.exists():
             paths.append(p)
         else:
@@ -192,7 +194,7 @@ def get_filepaths(files: list, pid_dir: Path):
     return paths
 
 
-def upload_files(orcid: str, pid: str, files: list[Path], client: MemberNodeClient_2_0, ap=None):
+def upload_files(orcid: str, pid: str, files: list, client: MemberNodeClient_2_0, ap=None, data_root=DATA_ROOT):
     """
     Upload the files to the Member Node.
 
@@ -206,14 +208,14 @@ def upload_files(orcid: str, pid: str, files: list[Path], client: MemberNodeClie
     :rtype: dict
     """
     L = getLogger(__name__)
-    global CN_URL
-    sep = '' if CN_URL.endswith('/') else '/'
+    mn_url = client.base_url
+    sep = '' if mn_url.endswith('/') else '/'
     data_pids = None
     sm_dict = {}
     # get the path to the data directory
-    pid_dir = Path(DATA_ROOT / pid)
+    pid_dir = Path(data_root / pid)
     # get the paths to the files
-    files = get_filepaths(piddir=pid_dir, files=files)
+    files = get_filepaths(files=files, pid_dir=pid_dir)
     flen = len(files)
     if flen == 0:
         raise FileNotFoundError(f'{pid} No files found for this version chain!')
@@ -251,7 +253,7 @@ def upload_files(orcid: str, pid: str, files: list[Path], client: MemberNodeClie
                     'pid': pid,
                     'identifier': data_pid,
                     'formatId': fformat,
-                    'url': f"{CN_URL}{sep}v2/resolve/{data_pid}",
+                    'url': f"{mn_url}{sep}v2/object/{data_pid}",
                 }
             else:
                 L.error(f'{pid} Unexpected response type: {type(dmd)}')
@@ -265,7 +267,7 @@ def upload_files(orcid: str, pid: str, files: list[Path], client: MemberNodeClie
     return sm_dict
 
 
-def upload_eml(orcid: str, pid: str, eml: str, client: MemberNodeClient_2_0, ap=None):
+def upload_eml(orcid: str, pid: str, eml: str|bytes, client: MemberNodeClient_2_0, ap=None):
     """
     Upload the EML to the Member Node.
     
@@ -280,9 +282,11 @@ def upload_eml(orcid: str, pid: str, eml: str, client: MemberNodeClient_2_0, ap=
     """
     L = getLogger(__name__)
     eml_pid = f"urn:uuid:{str(uuid.uuid4())}"
+    if not isinstance(eml, str):
+        eml = eml.decode("utf-8")
     eml_bytes = eml.encode("utf-8")
     eml_sm, eml_md5, eml_size = generate_system_metadata(pid=eml_pid,
-                                                         sid=pid,
+                                                         sid=None,
                                                          format_id="https://eml.ecoinformatics.org/eml-2.2.0",
                                                          science_object=eml_bytes,
                                                          orcid=orcid,
@@ -383,7 +387,7 @@ def report(succ: int, fail: int, finished_pids: list, failed_pids: list):
     L.info(rpt_txt % (fail, succ, failed_str, finished_str))
 
 
-def upload_manager(pids: list, orcid: str, client: MemberNodeClient_2_0, node: str):
+def upload_manager(pids: list, orcid: str, client: MemberNodeClient_2_0, node: str, data_root: Path, eml_override=False):
     """
     Package creation and upload loop. This function will create packages and
     upload them to the Member Node.
@@ -395,7 +399,8 @@ def upload_manager(pids: list, orcid: str, client: MemberNodeClient_2_0, node: s
     :param str node: The node identifier.
     """
     L = getLogger(__name__)
-    sep = '' if CN_URL.endswith('/') else '/'
+    mn_url = client.base_url
+    sep = '' if mn_url.endswith('/') else '/'
     n = len(pids)
     i = 0
     er = 0
@@ -407,14 +412,20 @@ def upload_manager(pids: list, orcid: str, client: MemberNodeClient_2_0, node: s
     except FileNotFoundError:
         uploads = {}
     try:
+        # Three EML pids exist.
+        # 1. The pid of the original EML (pid)
+        # 2. The pid of the latest EML on the server (latest_pid)
+        # 3. The pid of the EML to be uploaded (eml_pid)
+        # Take care to use the correct one in the correct context.
         for pid in pids:
             old_eml_pid, old_resource_map_pid = None, None
             i += 1
             L.debug(f'PID: {pid}')
-            pid = get_latest_version(client, pid)
+            latest_pid = get_latest_version(client, pid)
             ap = get_access_policy(client, pid)
             # get the files to be uploaded
-            files = get_files_from_dir(Path(DATA_ROOT / pid))
+            files = get_files_from_dir(Path(data_root / pid))
+            L.debug(f'{pid} found files: {files}')
             # check if the article has already been uploaded
             ulist = deepcopy(files)
             if not (uploads.get(pid)):
@@ -447,10 +458,11 @@ def upload_manager(pids: list, orcid: str, client: MemberNodeClient_2_0, node: s
                             del ulist[fn]
                         fn += 1
                 L.info(f'Found {prev_upls} files that were already uploaded associated with {pid}')
-            try:
+            if True:
+            # try:
                 if len(ulist) > 0:
                     # Upload the data files to the Member Node if there are any in the ulist
-                    sm_dict = upload_files(orcid, pid, ulist, client, ap=ap)
+                    sm_dict = upload_files(orcid, pid, ulist, client, ap=ap, data_root=data_root)
                     L.info(f'{pid} done. Uploaded {len(sm_dict)} files.')
                     for fi in sm_dict:
                         # add the uploaded files to the uploads dictionary
@@ -463,16 +475,22 @@ def upload_manager(pids: list, orcid: str, client: MemberNodeClient_2_0, node: s
                     save_uploads(uploads, fp=uploads_loc)
                 else:
                     L.info(f'No data files to upload for {pid}')
+                sm_dict = uploads[pid]
+                sm_delete = []
+                for f in sm_dict:
+                    if (sm_dict[f].get('filename') in 'eml.xml') or (sm_dict[f].get('filename') in 'resource_map.xml'):
+                        sm_delete.append(f)
+                for f in sm_delete:
+                    del sm_dict[f]
                 # Convert the article to EML
-                eml_string = client.get(pid).text
+                eml_string = client.get(latest_pid).text
                 eml_mod = update_eml(eml_string, sm_dict)
                 # Upload the EML to the Member Node
-                if uploads[pid].get('eml'):
-                    old_eml_pid = uploads[pid]['eml']['identifier']
-                    L.info(f'{pid} Found previous EML: {old_eml_pid}')
+                old_eml_pid = latest_pid
                 eml_pid, eml_md5, eml_size = upload_eml(orcid, pid, eml_mod, client, ap=ap)
+                L.info(f'{pid} New EML: {eml_pid}')
                 if old_eml_pid:
-                    L.info(f'{pid} Adding obsoletedBy to old EML sysmeta object: {uploads[pid]["eml"]["identifier"]}')
+                    L.info(f'{pid} Adding obsoletedBy to old EML sysmeta object')
                     # Update old sysmeta with obsoletedBy
                     sysmeta_obsolete_updates(client, old_eml_pid, eml_pid)
                 if eml_pid:
@@ -483,7 +501,7 @@ def upload_manager(pids: list, orcid: str, client: MemberNodeClient_2_0, node: s
                         'identifier': eml_pid,
                         'md5': eml_md5,
                         'formatId': "https://eml.ecoinformatics.org/eml-2.2.0",
-                        'url': f"{CN_URL}{sep}v2/resolve/{eml_pid}",
+                        'url': f"{mn_url}{sep}v2/object/{eml_pid}",
                     }
                     save_uploads(uploads, fp=uploads_loc)
                     # Generate the DataONE resource map
@@ -522,7 +540,7 @@ def upload_manager(pids: list, orcid: str, client: MemberNodeClient_2_0, node: s
                             'identifier': resource_map_pid,
                             'md5': resource_map_md5,
                             'formatId': "http://www.openarchives.org/ore/terms",
-                            'url': f"{CN_URL}{sep}v2/resolve/{resource_map_pid}",
+                            'url': f"{mn_url}{sep}v2/object/{resource_map_pid}",
                         }
                         save_uploads(uploads, fp=uploads_loc)
                         L.info(f'{pid} Resource map uploaded successfully: {resource_map_pid}')
@@ -533,10 +551,10 @@ def upload_manager(pids: list, orcid: str, client: MemberNodeClient_2_0, node: s
                     uploads[pid]['eml'] = None
                     raise exceptions.DataONEException(f'{pid} EML upload failed')
                 succ_list.append(pid)
-            except Exception as e:
-                er += 1
-                err_list.append(pid)
-                L.error(f'{pid} / {repr(e)}')
+            # except Exception as e:
+            #     er += 1
+            #     err_list.append(pid)
+            #     L.error(f'{pid} / {repr(e)}')
     except KeyboardInterrupt:
         L.info('Caught KeyboardInterrupt; generating report...')
     finally:

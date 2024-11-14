@@ -1,6 +1,7 @@
 from logging import getLogger
 import d1_client.mnclient as mn
-from xml.etree.ElementTree import Element, SubElement, tostring, ElementTree
+import xml.etree.ElementTree as ET
+from xml.dom import minidom
 from html2text import html2text
 from pathlib import Path
 
@@ -11,29 +12,32 @@ def get_etype(fileobj: Path):
     """
     Get the entity type from the filename.
     """
-    ext = fileobj.suffix
+    ext = Path(fileobj).suffix
     if fmts.get(ext):
         return fmts[ext]
     else:
         return 'application/octet-stream'
 
 
-def update_eml(eml, pids: dict):
+def update_eml(eml: Path, pids: dict):
     """
     Update the EML with the new resource PIDs.
     """
-    # Get the root element
-    root = eml.getroot()
+    L = getLogger(__name__)
+    root = ET.XML(eml)
     # Get the dataset element
-    dataset = SubElement(root, 'dataset')
+    dataset = root.find('.//dataset')
     # Clear the dataset subelement of previous content
-    for child in list(dataset):
+    for child in dataset.iter('otherEntity'):
         dataset.remove(child)
     # Add the new resource PIDs
+    L.info(f'Adding {len(pids)} resources to the EML')
     for pid in pids:
-        entity = SubElement(dataset, 'otherEntity', id=pid)
-        entityName = SubElement(entity, 'entityName')
-        entityName.text = pids[pid]
-        entityType = SubElement(entity, 'entityType')
-        entityType.text = get_etype(pids[pid])
-    return tostring(eml, encoding='unicode')
+        entity = ET.SubElement(dataset, 'otherEntity', id=pids[pid]['identifier'])
+        entityName = ET.SubElement(entity, 'entityName')
+        entityName.text = pids[pid]['filename']
+        entityType = ET.SubElement(entity, 'entityType')
+        entityType.text = get_etype(pids[pid]['filename'])
+    rough_string = ET.tostring(root, 'utf-8')
+    reparsed = minidom.parseString(rough_string)
+    return reparsed.toprettyxml(indent="  ")
