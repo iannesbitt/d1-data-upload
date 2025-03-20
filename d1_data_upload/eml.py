@@ -4,6 +4,7 @@ import xml.etree.ElementTree as ET
 from xml.dom import minidom
 from html2text import html2text
 from pathlib import Path
+import uuid
 
 from .utils import parse_name, get_lat_lon, get_article_list, write_article, fix_datetime
 from .defs import fmts
@@ -24,9 +25,16 @@ def update_eml(eml: Path, pids: dict):
     Update the EML with the new resource PIDs.
     """
     L = getLogger(__name__)
+    # Set the EML uuid
+    eml_pid = f"urn:uuid:{str(uuid.uuid4())}"
     root = ET.XML(eml)
     # Get the dataset element
     dataset = root.find('.//dataset')
+    # Unset the id attribute of the dataset element
+    if 'id' in dataset.attrib:
+        dataset.attrib['id'] = eml_pid
+    else:
+        dataset.set('id', eml_pid)
     # Clear the dataset subelement of previous content
     for child in dataset.iter('otherEntity'):
         dataset.remove(child)
@@ -40,4 +48,4 @@ def update_eml(eml: Path, pids: dict):
         entityType.text = get_etype(pids[pid]['filename'])
     rough_string = ET.tostring(root, 'utf-8')
     reparsed = minidom.parseString(rough_string)
-    return reparsed.toprettyxml(indent="  ")
+    return reparsed.toprettyxml(indent="  "), eml_pid

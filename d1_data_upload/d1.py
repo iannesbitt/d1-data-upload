@@ -267,7 +267,7 @@ def upload_files(orcid: str, pid: str, files: list, client: MemberNodeClient_2_0
     return sm_dict
 
 
-def upload_eml(orcid: str, pid: str, eml: str|bytes, client: MemberNodeClient_2_0, ap=None):
+def upload_eml(orcid: str, pid: str, eml: str|bytes, eml_pid: str, client: MemberNodeClient_2_0, ap=None):
     """
     Upload the EML to the Member Node.
     
@@ -281,7 +281,6 @@ def upload_eml(orcid: str, pid: str, eml: str|bytes, client: MemberNodeClient_2_
     :rtype: str
     """
     L = getLogger(__name__)
-    eml_pid = f"urn:uuid:{str(uuid.uuid4())}"
     if not isinstance(eml, str):
         eml = eml.decode("utf-8")
     eml_bytes = eml.encode("utf-8")
@@ -291,24 +290,18 @@ def upload_eml(orcid: str, pid: str, eml: str|bytes, client: MemberNodeClient_2_
                                                          science_object=eml_bytes,
                                                          orcid=orcid,
                                                          ap=ap)
-    eml_dmd = client.create(eml_pid, eml_bytes, eml_sm)
-    if isinstance(eml_dmd, dataoneTypes.Identifier):
-        try:
-            L.info(f'{pid} Received response for EML upload: {eml_dmd.value()}\n{eml_dmd}')
-            if eml_dmd.value() == eml_pid:
-                L.info(f'{pid} EML uploaded successfully: {eml_pid}')
-            else:
-                L.error(f'{pid} EML identifier does not match D1 identifier! {eml_pid} != {eml_dmd.value()}')
-        except Exception as e:
-            L.error(f'{pid} Received <d1_common.types.generated.dataoneTypes_v1.Identifier> but could not print value: {repr(e)}')
-        return eml_pid, eml_md5, eml_size
-    else:
-        L.error(f'{pid} Unexpected response type: {type(eml_dmd)}')
-        try:
-            L.debug(f'{pid} Received response:\n{eml_dmd.value()}')
-        except Exception as e:
-            L.error(f'{pid} Could not print response: {repr(e)}')
-        return None
+    try:
+        eml_dmd = client.create(eml_pid, eml_bytes, eml_sm)
+        L.info(f'{pid} Received response for EML upload: {eml_dmd.value()}\n{eml_dmd}')
+        if eml_dmd.value() == eml_pid:
+            L.info(f'{pid} EML uploaded successfully: {eml_pid}')
+        else:
+            L.error(f'{pid} EML identifier does not match D1 identifier! {eml_pid} != {eml_dmd.value()}')
+    except exceptions.DataONEException as e:
+        L.error(f'{pid} EML upload failed: {e}')
+    except Exception as e:
+        L.error(f'{pid} Got non DataONEException error: {e}')
+    return eml_md5, eml_size
 
 
 def generate_resource_map(eml_pid: str, data_pids: list):
@@ -484,10 +477,10 @@ def upload_manager(pids: list, orcid: str, client: MemberNodeClient_2_0, node: s
                     del sm_dict[f]
                 # Convert the article to EML
                 eml_string = client.get(latest_pid).text
-                eml_mod = update_eml(eml_string, sm_dict)
-                # Upload the EML to the Member Node
                 old_eml_pid = latest_pid
-                eml_pid, eml_md5, eml_size = upload_eml(orcid, pid, eml_mod, client, ap=ap)
+                eml_mod, eml_pid = update_eml(eml_string, sm_dict)
+                # Upload the EML to the Member Node
+                eml_md5, eml_size = upload_eml(orcid, pid, eml_mod, eml_pid, client, ap=ap)
                 L.info(f'{pid} New EML: {eml_pid}')
                 if old_eml_pid:
                     L.info(f'{pid} Adding obsoletedBy to old EML sysmeta object')

@@ -9,6 +9,7 @@ from d1_common.types import dataoneTypes
 from d1_common import const
 
 from pathlib import Path
+import glob
 from logging import getLogger
 from datetime import datetime, timedelta
 
@@ -501,7 +502,7 @@ def get_files_from_dir(directory: Path):
     :return: A list of files in the directory.
     :rtype: list
     """
-    objs = [f for f in directory.iterdir() if f.is_file()]
+    objs = [Path(f) for f in glob.iglob(str(directory)+"/**", recursive=True) if Path(f).is_file()]
     files = []
     for obj in objs:
         files.append({
